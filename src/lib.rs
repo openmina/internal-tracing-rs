@@ -5,7 +5,7 @@ mod internal_tracing {
 }
 
 #[cfg(feature = "enabled")]
-pub use serde_json::{json, Value as JsonValue};
+pub use serde_json::{json, to_writer as json_to_writer, Value as JsonValue};
 
 pub fn time_to_micros(time: SystemTime) -> u64 {
     time.duration_since(SystemTime::UNIX_EPOCH)
@@ -69,6 +69,33 @@ macro_rules! decl_traces {
                 )*
             }
 
+            impl std::fmt::Display for Traces {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    let mut arr = [
+                        $(
+                        (stringify!($checkpoint), self.$checkpoint.0, &self.$checkpoint.1),
+                        )+
+                    ];
+                    arr.sort_by_key(|v| v.1);
+                    let mut buf = Vec::new();
+                    for (name, time, meta) in arr.into_iter().filter(|v| v.1 != 0) {
+                        $crate::json_to_writer(&mut buf, &(name, (time as f64) / 1_000_000.0)).unwrap();
+                        buf.push(b'\n');
+                        if !meta.is_null() {
+                            $crate::json_to_writer(&mut buf, meta).unwrap();
+                            buf.push(b'\n');
+                        }
+                    }
+                    write!(f, "{}", &String::from_utf8(buf).unwrap())
+                }
+            }
+
+            impl From<Traces> for String {
+                fn from(t: Traces) -> Self {
+                    t.to_string()
+                }
+            }
+
             thread_local! {
                 pub static TRACES: Rc<RefCell<Traces>> = Default::default();
             }
@@ -88,21 +115,30 @@ macro_rules! decl_traces {
                 use super::*;
 
                 #[derive(Debug, ocaml::IntoValue, ocaml::FromValue, ocaml_gen::Struct)]
-                pub struct CamlTraces {
-                    $(
-                    pub $checkpoint: (usize, String),
-                    )*
-                }
+                pub struct CamlTraces(String);
 
                 impl From<Traces> for CamlTraces {
-                    fn from(v: Traces) -> CamlTraces {
-                        CamlTraces {
-                            $(
-                            $checkpoint: (v.$checkpoint.0 as usize, $crate::JsonValue::to_string(&v.$checkpoint.1)),
-                            )*
-                        }
+                    fn from(t: Traces) -> Self {
+                        Self(t.to_string())
                     }
                 }
+
+//                 #[derive(Debug, ocaml::IntoValue, ocaml::FromValue, ocaml_gen::Struct)]
+//                 pub struct CamlTraces {
+//                     $(
+//                     pub $checkpoint: (usize, String),
+//                     )*
+//                 }
+
+//                 impl From<Traces> for CamlTraces {
+//                     fn from(v: Traces) -> CamlTraces {
+//                         CamlTraces {
+//                             $(
+//                             $checkpoint: (v.$checkpoint.0 as usize, $crate::JsonValue::to_string(&v.$checkpoint.1)),
+//                             )*
+//                         }
+//                     }
+//                 }
             }
         }
     };
@@ -131,7 +167,6 @@ macro_rules! checkpoint {
         $crate::checkpoint!(|$name; $checkpoint, $crate::TimeInput::from($time).micros(), $crate::json!({$($metadata)+}));
     };
     (|$name:ident; $checkpoint:ident, $time:expr, $metadata:expr) => {
-        #[cfg(feature = "enabled")]
         $name::TRACES.with(|traces| traces.borrow_mut().$checkpoint = ($time, $metadata));
     };
 }
@@ -171,5 +206,7 @@ mod tests {
 
         assert_eq!(traces.c4.0, 3);
         assert_eq!(traces.c4.1, serde_json::json!({ "arg": 2 }));
+        eprintln!("{}", traces.to_string());
+        panic!();
     }
 }
